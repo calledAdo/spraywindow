@@ -1,0 +1,9 @@
+{
+  "cmd": "plan",
+  "timestamp": "2026-10-25T22:45:02.572Z",
+  "plan_id": "plan-f00f71cf",
+  "recalls": [
+    "replan"
+  ],
+  "note": "Session 2: recorded after correction \"Never spray Block B01 before 08:00; the school bus passes at 07:30\" (SPRAY_FORECAST_SOURCE=snapshot)"
+}

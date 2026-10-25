@@ -1,0 +1,14 @@
+node_modules/
+.env
+.env.*
+!.env.example
+dist/
+.data/
+runs/
+*.log
+.DS_Store
+.opencode/
+.memory/
+BRIEF*.md
+REPORT.md
+opencode-*.log

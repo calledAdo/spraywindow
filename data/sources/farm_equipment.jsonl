@@ -1,0 +1,4 @@
+{"equipment_id":"E01","name":"John Deere 4630 Sprayer","type":"sprayer","capacity_acres_per_hour":50,"status":"ready"}
+{"equipment_id":"E02","name":"Case IH Patriot 4440","type":"sprayer","capacity_acres_per_hour":60,"status":"ready"}
+{"equipment_id":"E03","name":"Valley Center Pivot","type":"irrigation","capacity_acres_per_hour":100,"status":"ready"}
+{"equipment_id":"E04","name":"Gator Utility Vehicle","type":"support","capacity_acres_per_hour":0,"status":"ready"}

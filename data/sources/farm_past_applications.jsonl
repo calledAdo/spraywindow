@@ -1,0 +1,6 @@
+{"application_id":"APP_001","block_id":"B01","product_id":"PROD_INSECT_01","applied_at":"2026-05-15T06:30:00Z","rate":4.5,"rate_unit":"oz_per_acre","outcome":"good_control"}
+{"application_id":"APP_002","block_id":"B02","product_id":"PROD_INSECT_02","applied_at":"2026-05-20T06:45:00Z","rate":6,"rate_unit":"oz_per_acre","outcome":"good_control"}
+{"application_id":"APP_003","block_id":"B03","product_id":"PROD_INSECT_01","applied_at":"2026-05-10T07:00:00Z","rate":4.5,"rate_unit":"oz_per_acre","outcome":"moderate_control"}
+{"application_id":"APP_004","block_id":"B04","product_id":"PROD_FUNG_01","applied_at":"2026-06-01T06:00:00Z","rate":3.5,"rate_unit":"oz_per_acre","outcome":"excellent_control"}
+{"application_id":"APP_005","block_id":"B05","product_id":"PROD_INSECT_03","applied_at":"2026-05-25T06:30:00Z","rate":2,"rate_unit":"lb_per_acre","outcome":"good_control"}
+{"application_id":"APP_006","block_id":"B01","product_id":"PROD_INSECT_01","applied_at":"2026-04-20T06:30:00Z","rate":4.5,"rate_unit":"oz_per_acre","outcome":"drift_to_school"}
