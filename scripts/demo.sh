@@ -22,7 +22,10 @@ npx tsx src/cli.ts correct "Never spray Block B01 before 08:00; the school bus p
 echo; echo "--- Session 2: the plan changes because of the memory ---"
 npx tsx src/cli.ts plan
 
-LATEST_RUN=$(ls -dt runs/*/ 2>/dev/null | head -1)
+echo; echo "--- Release: verify every signed action contract ---"
+npx tsx src/cli.ts release
+
+LATEST_RUN=$(ls -dt runs/*/ 2>/dev/null | grep -v release | head -1)
 PLAN_FILE=$(ls "$LATEST_RUN"plan-*.html 2>/dev/null | head -1 || true)
 if [ -n "${PLAN_FILE:-}" ]; then
   echo; echo "Plan page: file://$(pwd)/$PLAN_FILE"

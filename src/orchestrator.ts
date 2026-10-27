@@ -7,7 +7,8 @@ import { loadRules, loadForecast, checkRules, type LegalWindow } from "./agents/
 import { analyzeWeather } from "./agents/weather_analyst.ts";
 import type { WeatherFlag } from "./domain.ts";
 import { initHmem, recordCorrection, retrieveForPlan, detectConflicts, type Correction } from "./agents/memory_keeper.ts";
-import { createPlan, type PlannerInput, type PlannedAction, signContract, verifyContract } from "./agents/planner.ts";
+import { createPlan, type PlannerInput, type PlannedAction } from "./agents/planner.ts";
+import { actionHash, contractSecret, signContract, verifyContract } from "./contracts.ts";
 import { critiquePlan, type CriticInput } from "./agents/critic.ts";
 import { renderPlan } from "./agents/reporter.ts";
 import type { Block, ProductRule, WeatherHour, CrewMember, Equipment, ModelReceipt, MemoryRef, ContractInputs, Plan } from "./domain.ts";
@@ -15,7 +16,7 @@ import type { Receipt } from "./llm.ts";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 
-const CONTRACT_SECRET = "spraywindow-contract-secret-change-in-production";
+const CONTRACT_SECRET = contractSecret();
 
 export type OrchestratorOptions = {
   runId: string;
@@ -110,6 +111,7 @@ export async function runPlanPipeline(opts: OrchestratorOptions): Promise<{ plan
       // Sign contracts for each action
       for (const action of planActions) {
         const inputs: ContractInputs = {
+          action_hash: actionHash(action),
           block_hash: hashObj({ block_id: action.block_id, block_name: action.block_name }),
           label_hash: hashObj({ product_id: action.product_id }),
           weather_hash: hashObj({ forecast: action.weather }),

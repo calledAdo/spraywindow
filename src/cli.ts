@@ -8,7 +8,7 @@ import { ROOT, env, redact, getSampleMode } from "./env.ts";
 import { randomUUID } from "node:crypto";
 import { PolicyRefusal } from "./data/policy.ts";
 import { openBackend } from "./data/index.ts";
-import { runPlanPipeline, recordCorrection, type Correction, CONTRACT_SECRET, verifyContract } from "./orchestrator.ts";
+import { runPlanPipeline, recordCorrection, type Correction } from "./orchestrator.ts";
 import { renderPlan } from "./agents/reporter.ts";
 import { Trace } from "./trace.ts";
 import { writeFileSync, mkdirSync, existsSync, readFileSync, readdirSync } from "node:fs";
@@ -16,6 +16,8 @@ import path from "node:path";
 import { withModelRuntime } from "./llm.ts";
 import { recordingsFor } from "./cassette.ts";
 import { initHmem } from "./agents/memory_keeper.ts";
+import { checkAction, contractSecret } from "./contracts.ts";
+import type { Plan } from "./domain.ts";
 
 const args = process.argv.slice(2);
 const cmd = args[0];
@@ -61,6 +63,7 @@ async function main() {
           const outDir = path.join(ROOT, "runs", runId);
           mkdirSync(outDir, { recursive: true });
           writeFileSync(path.join(outDir, `plan-${plan.plan_id}.html`), html);
+          writeFileSync(path.join(outDir, "plan.json"), JSON.stringify(plan, null, 2) + "\n");
           writeFileSync(path.join(outDir, "run.json"), JSON.stringify({ runId, cmd, today, backend: backend.name, sampleMode: isSampleMode(), plan_id: plan.plan_id, actions: plan.actions.length }, null, 2) + "\n");
           console.log(`\nPlan generated: ${path.join(outDir, `plan-${plan.plan_id}.html`)}`);
           console.log(`Actions: ${plan.actions.length}`);
@@ -109,6 +112,7 @@ async function main() {
           const outDir = path.join(ROOT, "runs", runId);
           mkdirSync(outDir, { recursive: true });
           writeFileSync(path.join(outDir, `plan-${plan.plan_id}.html`), html);
+          writeFileSync(path.join(outDir, "plan.json"), JSON.stringify(plan, null, 2) + "\n");
           writeFileSync(path.join(outDir, "run.json"), JSON.stringify({ runId, cmd, today, backend: backend.name, sampleMode: isSampleMode(), plan_id: plan.plan_id, actions: plan.actions.length, re_plan: true }, null, 2) + "\n");
           console.log(`\nRe-plan complete: ${path.join(outDir, `plan-${plan.plan_id}.html`)}`);
           console.log(`Actions: ${plan.actions.length}`);
@@ -123,30 +127,21 @@ async function main() {
 
       case "release": {
         const work = async () => {
-          // Find the most recent plan in runs/
+          // Verify every contract in the most recent saved plan; refuse the release if any fails.
           const runsDir = path.join(ROOT, "runs");
-          if (!existsSync(runsDir)) throw new Error("No runs directory found");
-          const runDirs = readdirSync(runsDir).filter(d => d.startsWith("2")).sort().reverse();
-          let found = false;
-          for (const dir of runDirs) {
-            const runFile = path.join(runsDir, dir, "run.json");
-            if (!existsSync(runFile)) continue;
-            const run = JSON.parse(readFileSync(runFile, "utf8"));
-            if (run.plan_id) {
-              const planFile = path.join(runsDir, dir, `plan-${run.plan_id}.html`);
-              if (existsSync(planFile)) {
-                // In a real implementation, we'd load the plan JSON and verify contracts
-                // For now, report that we found a plan
-                console.log(`\nFound plan ${run.plan_id} from ${dir}`);
-                console.log("Contract verification: all action contracts valid (HMAC-SHA256)");
-                console.log("Contract secret: configured");
-                found = true;
-                break;
-              }
-            }
-          }
-          if (!found) throw new Error("No plan found to release");
-          writeFileSync(path.join(trace.dir, "run.json"), JSON.stringify({ runId, cmd, today, backend: backend.name, sampleMode: isSampleMode(), released: true }, null, 2) + "\n");
+          const latest = existsSync(runsDir)
+            ? readdirSync(runsDir).filter(d => existsSync(path.join(runsDir, d, "plan.json"))).sort().reverse()[0]
+            : undefined;
+          if (!latest) throw new Error("No saved plan to release; run plan first");
+          const plan = JSON.parse(readFileSync(path.join(runsDir, latest, "plan.json"), "utf8")) as Plan;
+          const secret = contractSecret();
+          const results = plan.actions.map(a => ({ action: a, ...checkAction(a, secret) }));
+          console.log(`\nPlan ${plan.plan_id} from ${latest}`);
+          for (const r of results) console.log(`  ${r.ok ? "RELEASE" : "REFUSE "} ${r.action.action_id}: ${r.reason}`);
+          const refused = results.filter(r => !r.ok).length;
+          writeFileSync(path.join(trace.dir, "run.json"), JSON.stringify({ runId, cmd, today, backend: backend.name, sampleMode: isSampleMode(), plan_id: plan.plan_id, released: results.length - refused, refused }, null, 2) + "\n");
+          if (refused) throw new Error(`${refused} action(s) refused; nothing released`);
+          console.log(`All ${results.length} actions released.`);
         };
         if (isSampleMode()) await withModelRuntime({ mode: "replay", recordings: recordingsFor("release", false) }, work);
         else await work();

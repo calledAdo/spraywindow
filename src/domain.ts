@@ -128,6 +128,7 @@ export type MemoryRef = {
 export type ActionKind = "spray" | "irrigate" | "hold" | "escalate";
 
 export type ContractInputs = {
+  action_hash: string;
   block_hash: string;
   label_hash: string;
   weather_hash: string;

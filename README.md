@@ -1,195 +1,150 @@
 # Spray Window
 
-Spray Window is a field-operations decision agent for a farm manager or crop advisor. Each morning it decides, for the next 48 hours, which fields (blocks) to **spray, irrigate or hold**, and when. It produces a work-order plan where every action carries its reasons and a signed contract. It remembers corrections from people, and it re-plans when the forecast changes.
+Spray Window plans a farm's next 48 hours every morning: which blocks to **spray, irrigate or hold**, and when. It checks the live forecast against real EPA pesticide labels, the crews and equipment on hand, and the local rules people teach it. Every action gets a time window, a crew, a sprayer, its reasons and a signed contract. It proposes work orders; it does not operate equipment, and a certified applicator makes the final call.
 
-## The Problem
+The demo farm (five almond and pistachio blocks near Fresno, California) is **fictional**. The pesticide label values are real, taken from EPA-accepted labels, and the forecast is the real Open-Meteo forecast for that location.
 
-Farm managers face a daily decision: which fields to spray, when to irrigate, and when to hold. Each decision depends on:
+## Try it without credentials
 
-- **Live weather** — wind speed/gusts/direction, precipitation probability, temperature, humidity
-- **Pesticide label rules** — legal wind limits, rainfast hours, re-entry intervals (REI), pre-harvest intervals (PHI), buffer zones, maximum rates
-- **Farm constraints** — crew certifications, equipment availability, sensitive sites (schools, waterways, residences)
-- **Human knowledge** — corrections like "never spray Block 7 with a west wind; the school bus passes at 7:30"
+Use Node.js 20 or later and npm. In a clone of this repository:
 
-Getting this wrong risks drift, illegal applications, crop damage, or worker safety violations. Current tools are spreadsheets or memory. Spray Window unifies these into a single, auditable, 48-hour work order.
-
-## Quick Start (Offline Demo)
-
-```bash
+```sh
 npm install
 npm run demo
 ```
 
-This runs in `SAMPLE_MODE=true` with no credentials, in about a second. It uses local DuckDB over the committed data files and model replies recorded live from Nightshift (NVIDIA Nemotron). The demo plans, records a person's correction ("Never spray Block B01 before 08:00; the school bus passes at 07:30"), then plans again: B01's spray moves from 07:15 to 08:06 and the plan cites memory `mem-1`. Each plan is a self-contained HTML page at `runs/<runId>/plan-*.html`.
+No `.env`, Docker, Zetaris or Nightshift account is needed. DuckDB reads the committed data files, the real agents execute, and model replies recorded live from Nightshift replay only when the entire request matches. The demo runs in about a second:
 
-## Quick Start (Live)
+1. **Session 1** plans the 48 hours: two irrigations, then five sprays. North 40 (B01) is sprayed at **07:15**.
+2. **A person records a correction:** "Never spray Block B01 before 08:00; the school bus passes at 07:30."
+3. **Session 2** plans again on the same forecast. B01 moves to **08:06**, and the plan cites memory `mem-1` and its trust-ledger entry.
+4. **Release** verifies every signed action contract and releases all seven actions.
 
-```bash
-# 1. Copy and fill .env from .env.example (Zetaris, Nightshift, Postgres, S3)
+Each plan is a self-contained HTML page under `runs/`, with the block map, actions by day, rule checks, cited memories, the critic's notes, weather flags, model receipts and the full trace. Open it directly in a browser.
+
+## Why the decision is hard
+
+One morning's plan has to satisfy several rule sets at once:
+
+| Label (EPA reg. no.) | Wind | Rain-free | Re-entry | Before harvest | Buffer |
+|---|---|---|---|---|---|
+| Altacor (352-730) | 3–10 mph (advisory) | not stated | 4 h | 10 days | 100 ft from water |
+| Delegate WG (62719-541) | max 15 mph | not stated | 4 h | 1 day | not stated |
+| Quash, metconazole (59639-147) | 2–10 mph | 2 h | 12 h | 25 days | not stated |
+| Esteem Ant Bait (59639-114) | not stated | 6 h | 12 h | 1 day | not stated |
+
+Values come from each label's tree-nut section; the full table with label links is in [data/README.md](data/README.md). Five blocks × 48 hours × 6 label rules is **1,440 rule checks** every morning, before crews, equipment, schools, creeks and the manager's own rules are considered. Done by hand, that is roughly an hour of cross-checking each morning (our estimate).
+
+## Live setup
+
+Install Zetaris Docker separately, and configure a Nightshift runtime with the NVIDIA provider. Fill a local `.env` from the placeholders in `.env.example`; do not commit it. Spray Window reuses the PostgreSQL and S3-compatible (SeaweedFS) containers from its sibling project [Lotline](https://github.com/calledAdo/lotline):
+
+```sh
 cp .env.example .env
 # Fill in credentials locally before continuing.
-
-# 2. Start Lotline's Postgres and SeaweedFS (if not already running)
-cd ../lotline && docker compose --env-file .env -f infra/docker-compose.yml up -d && cd -
-
-# 3. Seed farm data, fetch weather, upload to S3, register in Zetaris
-npm run data:seed
-npm run data:weather
-npm run data:upload
-npm run setup:zetaris
-
-# 4. Generate today's 48-hour plan
+npm install
+npm run data:seed && npm run data:weather && npm run data:upload && npm run setup:zetaris
 npm run spray -- plan
 ```
 
-The plan HTML will be at `runs/<runId>/plan-*.html`.
+`data:seed` writes the fictional farm to the `farm` PostgreSQL database and to `data/sources/`. `data:weather` fetches the Open-Meteo forecast snapshot. `data:upload` puts the label rules and snapshot under `s3://lotline/spraywindow/`. `setup:zetaris` registers every source and creates five non-admin users and roles, one per agent (`sw_rules_checker`, `sw_weather_analyst`, `sw_memory_keeper`, `sw_planner`, `sw_critic`), each with SELECT on its own tables only. Generated passwords are written only to `.env`. See [the principal policy](src/data/policy.ts) and [the DCL](scripts/setup_zetaris_principals.sql).
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `npm run spray -- plan` | Generate today's 48-hour plan |
-| `npm run spray -- correct "text" --block B01` | Record a human correction for a block |
-| `npm run spray -- watch` | Re-check forecast and re-plan affected actions |
-| `npm run spray -- release` | Verify all action contracts |
+```sh
+npm run spray -- plan                                      # today's 48-hour plan
+npm run spray -- correct "Never before 08:00" --block B01  # record a correction
+npm run spray -- watch                                     # re-plan on the current forecast and memories
+npm run spray -- release                                   # verify contracts, then release
+npm run record:cassettes                                   # record a live run for offline replay
+```
 
-Prefix any command with `SAMPLE_MODE=true` for offline operation.
+Prefix commands with `SAMPLE_MODE=true` for offline operation. `--today YYYY-MM-DD` (or `SPRAY_TODAY`) sets the planning date. Memory is stored durably in `.memory/`, or in `SPRAY_MEMORY_DIR`. `release` refuses the whole release if any action's contract is missing, was signed for a different version of the action, has an invalid signature, or has expired.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Spray Window Pipeline                        │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐          │
-│  │   Rules      │    │   Weather    │    │   Memory     │          │
-│  │   Checker    │    │   Analyst    │    │   Keeper     │          │
-│  │ (Determinist)│    │ (Lightning)  │    │  (H-MEM)     │          │
-│  └──────┬───────┘    └──────┬───────┘    └──────┬───────┘          │
-│         │                   │                   │                  │
-│         └───────────────────┼───────────────────┘                  │
-│                             ▼                                      │
-│                    ┌────────────────┐                              │
-│                    │    Planner     │                              │
-│                    │ (Lightning/    │                              │
-│                    │  Ultra)        │                              │
-│                    └───────┬────────┘                              │
-│                            │                                       │
-│                            ▼                                       │
-│                    ┌────────────────┐                              │
-│                    │     Critic     │                              │
-│                    │  (Ultra + Rule │                              │
-│                    │   Auditors)    │                              │
-│                    └───────┬────────┘                              │
-│                            │                                       │
-│                    ┌───────┴───────┐                               │
-│                    ▼               ▼                               │
-│             ┌──────────┐    ┌──────────┐                           │
-│             │ Approved │    │ Objections│ (max 3 rounds)          │
-│             └──────────┘    └──────────┘                           │
-│                    │                                               │
-│                    ▼                                               │
-│             ┌────────────────┐                                     │
-│             │ Signed Action  │                                     │
-│             │ Contracts      │                                     │
-│             └────────────────┘                                     │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+  Data[Zetaris: farm PostgreSQL, label CSV in S3, Open-Meteo REST] --> Rules[Rules checker: legal hours per block, product and hour]
+  Local[Offline DuckDB over committed files] --> Rules
+  Data --> Weather[Weather analyst: gusts, inversions, rain risk]
+  Mem[Meterless H-MEM: corrections, trust ledger, conflicts] --> Keeper[Memory keeper: corrections for each block]
+  Rules --> Planner[Planner: actions inside legal windows, crews and sprayers]
+  Weather --> Planner
+  Keeper --> Planner
+  Planner --> Critic[Ultra critic + deterministic rule audits]
+  Critic -->|objections; max 3 rounds| Planner
+  Critic --> Sign[Signed action contracts]
+  Sign --> Reporter[Reporter: offline HTML plan with reasons and receipts]
+  Sign --> Release[Release: verify every contract]
+  Person[Manager's correction] --> Mem
+  NS[Nightshift: pinned Nemotron lanes and receipts] --- Weather
+  NS --- Planner
+  NS --- Critic
 ```
 
-### Agents
+| Agent | Runs on | Job |
+|---|---|---|
+| Rules checker | Code only | Computes every legal hour from the forecast and the label limits. The AI never decides what is legal. |
+| Weather analyst | Nemotron 3.5 Lightning | Flags gust spread, calm-wind inversion risk and rain probability as structured flags. |
+| Memory keeper | Meterless H-MEM | Retrieves each block's corrections, plus related memories, with provenance. |
+| Planner | Lightning, then Ultra for revisions | Proposes the plan inside the legal windows, crew shifts and equipment. |
+| Critic | Nemotron 3 Ultra + rule audits | Challenges the plan against rules, memories and buffers, and sends it back for up to three rounds. |
+| Reporter | Code only | Renders the plan page with every reason, check, memory and receipt. |
 
-| Agent | Model | Role |
-|-------|-------|------|
-| Rules Checker | None (deterministic) | Computes legal windows per block/product/hour from forecast + label rules |
-| Weather Analyst | Nemotron 3.5 Lightning | Interprets uncertainty: gust spread, dawn inversion, high precip probability |
-| Memory Keeper | H-MEM | Retrieves corrections/precedents per block with provenance & trust ledger |
-| Planner | Nemotron 3.5 Lightning / Ultra | Proposes 48-hour plan within legal windows, crew & equipment constraints |
-| Critic | Nemotron 3 Ultra + rule auditors | Challenges plan against rules, memories, safety buffers; up to 3 revision rounds |
+Where a label states no value, the rules checker applies a named farm-policy default (wind 2–10 mph, 4 rain-free hours) and every check says whether the label or farm policy set the limit. Rain is checked across the whole rain-free period after the application hour. Every action's contract is an HMAC-SHA256 over a hash of the action itself (kind, block, times, product and rate) and of its block, label, weather, memories and plan context. The signing key comes from `SPRAY_CONTRACT_SECRET`, or from a random key kept beside the local memory store.
 
-### Data Layer
+## Sponsor technology
 
-- **Zetaris** — Single query surface over farm Postgres, label rules CSV (S3), weather REST + snapshot (S3). Five `sw_` principals with table-specific SELECT grants.
-- **SAMPLE_MODE** — DuckDB over local JSONL/CSV files, same table names
+**Zetaris.** One governed data layer over three kinds of source: a PostgreSQL datasource (`farm`: blocks, crew, equipment, past applications), Lightning filestore tables in object storage (`products.label_rules` as CSV, `weather_snap.forecast_snapshot` as JSON), and a Lightning REST table over the live Open-Meteo API, flattened by the SchemaStore view `weather_views.forecast`. Each agent queries as its own least-privilege user.
 
-### Contracts
+**Meterless H-MEM.** The Apache-2.0 reference at upstream commit `1742dec56a66e58eef9dda2d2b865823758ca8cd` is vendored in [engines/hmem](engines/hmem/), with its LICENSE, NOTICE and upstream commit. Spray Window uses its durable JSON state and append-only trust ledger, retrieval with reinjection into the planner's prompt, and conflict detection between an old rule and a new correction. The upstream conformance suite runs unmodified against the adapter.
 
-Every released action carries an HMAC-SHA256 contract over:
-- Block hash, label hash, weather hash, memory hash, plan context hash
-- Release refuses any action whose contract is missing, invalid, or stale
+**Nightshift and NVIDIA.** Every model request goes through Nightshift's OpenAI-compatible `/chat/completions` API, with the models pinned by name: `nvidia/nemotron-3.5-lightning-30b-a3b` for the weather analyst and first plan (with `chat_template_kwargs.enable_thinking=false` for structured output), and `nvidia/nemotron-3-ultra-550b-a55b` for revisions and critique. Generic routing aliases are deliberately avoided. Each call records its receipt ID, routed model, provider, latency, tokens and cost, and the plan page lists them.
 
-## Sponsor Technology
+See [the standalone sponsor explanation](docs/sponsor-tech.md).
 
-| Sponsor | Use in Spray Window |
-|---------|---------------------|
-| **Zetaris** | One SQL surface over farm Postgres, label rules (S3 CSV), weather (REST + S3 snapshot). Five `sw_` principals with table-specific SELECT grants. |
-| **H-MEM** | Memory Keeper agent: retrieves corrections/precedents per block, trust ledger audit, conflict detection between old rules and new corrections. Conformance suite passes **13/13** checks. |
-| **Nightshift + NVIDIA** | Two pinned Nemotron lanes: `nvidia/nemotron-3.5-lightning-30b-a3b` (fast: weather analyst, planner) and `nvidia/nemotron-3-ultra-550b-a55b` (deep: critic). Every call records Nightshift compute receipt (receipt ID, routed model, provider). |
+### Where the engine is used (judges look here)
 
-See [docs/sponsor-tech.md](docs/sponsor-tech.md) for details.
+| Feature | Engine use | Code |
+|---|---|---|
+| Record a person's correction | `add` with provenance; ledger `create` entry | `src/agents/memory_keeper.ts` |
+| Corrections for each block | Tag lookup plus `query` retrieval; ledger `read` entries | `src/agents/memory_keeper.ts` |
+| Plan changes because of memory | Retrieved memories reinjected into the planner prompt and cited per action | `src/agents/planner.ts`, `src/orchestrator.ts` |
+| Old rule versus new correction | `conflicts.scan` and `autoResolve`, logged to the ledger | `src/agents/memory_keeper.ts` |
+| Durable across runs | JSON state and append-only ledger in `.memory/` | `engines/hmem/reference/src/memoryStore.ts` |
+| Memory cited on the plan page | Memory ID and ledger entry per action | `src/agents/reporter.ts` |
 
 ## Evaluation
 
-```bash
+```sh
 npm run typecheck
 npm test
 npm run engine:conformance
-SAMPLE_MODE=true npm run demo
+npm run demo
 ```
 
-- **Offline tests** (fast): memory demo, rules checker (legal windows, PHI, rain inside the rainfast period, unstated label values), contract verification, replan staleness — **18/18 pass**
-- **H-MEM conformance**: **13/13 checks pass** (record validation, feedback deltas, ranking order, sleep guardrails, conflict gate, ledger audit, dream boundary)
-- **Live runs** (`npm run record:cassettes`): two runs against Zetaris and Nightshift, recorded to `data/cassettes/`. Each made 9 Nemotron calls (Lightning for the weather analyst and first plan, Ultra for revisions and critique), all HTTP 200 with compute receipts. In both, the critic objected in rounds 1 and 2 and approved in round 3. The second run was recorded after the B01 correction (`SPRAY_FORECAST_SOURCE=snapshot`, same forecast) and moved B01's spray to 08:06.
+- **Tests:** 19 offline tests cover legal windows, the pre-harvest deadline, rain inside the rain-free period, unstated label values, contract signing and release refusals (including an action edited after signing), the memory demo and re-plan staleness. All pass.
+- **H-MEM conformance:** 13/13 upstream checks pass (record validation, feedback deltas, ranking order, sleep guardrails, conflict gate, ledger audit, dream boundary).
+- **Live runs:** two runs against Zetaris and Nightshift are recorded in `data/cassettes/`. Each made 9 Nemotron calls, all HTTP 200 with receipts. In both, the critic objected in rounds 1 and 2 and approved in round 3. The second run was recorded after the B01 correction against the same forecast (`SPRAY_FORECAST_SOURCE=snapshot`) and moved B01's spray to 08:06. The offline demo replays both runs with no fallbacks.
 
-## Data Sources & Licences
+## Data, licences and pre-existing work
 
-| Source | Licence | Notes |
-|--------|---------|-------|
-| Open-Meteo forecast | CC BY 4.0 | Free, no key required. `https://open-meteo.com/` |
-| EPA pesticide labels | Public domain (US government) | **6 verified products** cited by EPA registration number and PPLS label URL. Unknown values marked `not stated on label`, never invented. |
-| Farm records | Synthetic (fictional) | 5 blocks, 4 crew, 4 equipment, 6 past applications. Clearly labelled fictional. |
+[Data sources](data/README.md) lists every label value with its PPLS link. EPA labels are US Government works; the Open-Meteo forecast is CC BY 4.0; the farm records are synthetic. No personal data is included.
 
-## Limitations
+The Meterless H-MEM reference is the declared pre-existing component, retained under Apache-2.0. Spray Window reuses patterns from its sibling project Lotline (the Zetaris client, Nightshift client and record/replay design), written by the same author during the same build window. Package dependencies are third-party components listed in the lockfile.
 
-- Advisory decision support only. The label is the law.
-- Synthetic farm data — not real fields.
-- Weather from Open-Meteo (GFS/ECMWF models) — not a substitute for on-site measurement.
-- Model outputs (weather analyst, planner, critic) are probabilistic; deterministic rules checker is the legal authority.
-- Memory is durable on local disk (`.memory/`, or `SPRAY_MEMORY_DIR`): JSON state plus an append-only trust ledger. It is single-user; a shared deployment would need a shared store.
-- Maximum 3 critic revision rounds; unresolved objections escalate to a person.
+## Limitations and security
 
-## Safety Disclaimer
+- **Advisory only.** Follow the pesticide label; the label is the law. A certified applicator must confirm weather, rates, buffers, re-entry and pre-harvest intervals, and local restrictions before any application.
+- The farm is fictional, and the label table covers six products for tree nuts. Labels change; check the current label.
+- The forecast is a model, not an on-site measurement. Wind direction is used for buffers, but drift also depends on droplet size and equipment.
+- `watch` re-plans the whole 48 hours on the current forecast and memories; it does not yet re-derive only the affected actions.
+- Models can disagree, time out or return invalid JSON. Revisions stop after three rounds; unresolved objections are left for a person. Fallbacks are labelled in the trace.
+- Per-agent SELECT grants are enforced by Zetaris, and by a shared allowlist in DuckDB. This is application access control, not isolation from a developer who can read `.env`.
+- Memory is single-user local storage. A shared deployment needs a shared store and access control.
+- `.env`, `.memory/`, runs and dependencies are ignored. Recorded cassettes contain model request and response bodies only, never authorization headers.
 
-> **Advisory decision support only. Follow the pesticide label; the label is the law. A certified applicator must confirm weather, rates, buffers, REIs, PHIs and local restrictions before application.**
+## Licence
 
-## Project Structure
-
-```
-src/
-  agents/           # Rules checker, weather analyst, memory keeper, planner, critic, reporter
-  data/             # Zetaris + DuckDB backend, policy, dialect
-  cli.ts            # CLI: plan, correct, watch, release
-  orchestrator.ts   # Multi-agent pipeline coordinator
-  context.ts        # Run context (backend, H-MEM, trace)
-  domain.ts         # TypeScript types
-  llm.ts            # Nightshift client with receipts
-  trace.ts          # Run trace (JSONL)
-  cassette.ts       # Record/replay for offline demo
-scripts/
-  seed-farm.ts      # Seed synthetic farm data to Postgres + JSONL
-  fetch-weather.ts  # Fetch Open-Meteo forecast to snapshot
-  upload-objects.ts # Upload to SeaweedFS bucket lotline/spraywindow/
-  setup-zetaris.ts  # Register Zetaris sources + principals
-  record-cassettes.ts # Record live run for offline demo
-  demo.sh           # Offline demo runner
-engines/hmem/       # H-MEM reference implementation + conformance
-test/               # Unit tests + conformance
-data/
-  sources/          # JSONL/CSV for SAMPLE_MODE DuckDB
-  snapshot/         # Frozen forecast for SAMPLE_MODE
-```
-
-## License
-
-Apache-2.0
+Apache-2.0. See [LICENSE](LICENSE).

@@ -3,7 +3,6 @@
 import { chatJson, type Lane, type Receipt } from "../llm.ts";
 import type { Trace } from "../trace.ts";
 import type { Block, ProductRule, WeatherHour, LegalWindow, CrewMember, Equipment, PlannedAction, ActionKind, MemoryRef, ContractInputs } from "../domain.ts";
-import { createHmac } from "node:crypto";
 
 export { type PlannedAction } from "../domain.ts";
 
@@ -176,13 +175,4 @@ function deterministicFallback(input: PlannerInput): PlannedAction[] {
   }
 
   return actions;
-}
-
-export function signContract(inputs: ContractInputs, secret: string): string {
-  const payload = JSON.stringify(inputs);
-  return createHmac("sha256", secret).update(payload).digest("hex");
-}
-
-export function verifyContract(inputs: ContractInputs, signature: string, secret: string): boolean {
-  return signContract(inputs, secret) === signature;
 }
