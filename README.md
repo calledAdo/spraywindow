@@ -104,7 +104,7 @@ Where a label states no value, the rules checker applies a named farm-policy def
 
 **Nightshift and NVIDIA.** Every model request goes through Nightshift's OpenAI-compatible `/chat/completions` API, with the models pinned by name: `nvidia/nemotron-3.5-lightning-30b-a3b` for the weather analyst and first plan (with `chat_template_kwargs.enable_thinking=false` for structured output), and `nvidia/nemotron-3-ultra-550b-a55b` for revisions and critique. Generic routing aliases are deliberately avoided. Each call records its receipt ID, routed model, provider, latency, tokens and cost, and the plan page lists them.
 
-See [the standalone sponsor explanation](docs/sponsor-tech.md).
+See [the Zetaris Unified Semantic Layer write-up](docs/zetaris-usl.md) (use case, sources, DDL, live query results, data quality rules, time saved, and a feature requirement) and [the standalone sponsor explanation](docs/sponsor-tech.md).
 
 ### Where the engine is used (judges look here)
 

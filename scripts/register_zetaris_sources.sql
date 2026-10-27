@@ -66,3 +66,15 @@ CREATE LIGHTNING FILESTORE TABLE forecast_snapshot FROM weather_snap FORMAT JSON
   awsAccessKeyId "${S3_ACCESS_KEY}",
   awsSecretAccessKey "${S3_SECRET_KEY}"
 );
+-- 5. Semantic view: each product's label wind limits against every forecast hour.
+--    Label cells hold a number or "not stated on label"; unstated limits stay NULL.
+CREATE SCHEMASTORE CONTAINER sw_views;
+CREATE SCHEMASTORE VIEW wind_legal_hours WITH CONTAINER sw_views AS
+SELECT r.product_id, r.name AS product_name, f.valid_at, f.wind_speed_mph, f.wind_gust_mph,
+       CASE WHEN r.wind_min_mph RLIKE '^[0-9.]+$' THEN CAST(r.wind_min_mph AS DOUBLE) END AS label_wind_min_mph,
+       CASE WHEN r.wind_max_mph RLIKE '^[0-9.]+$' THEN CAST(r.wind_max_mph AS DOUBLE) END AS label_wind_max_mph,
+       CASE WHEN r.wind_max_mph NOT RLIKE '^[0-9.]+$' THEN 'not stated on label'
+            WHEN CAST(f.wind_speed_mph AS DOUBLE) <= CAST(r.wind_max_mph AS DOUBLE)
+             AND (r.wind_min_mph NOT RLIKE '^[0-9.]+$' OR CAST(f.wind_speed_mph AS DOUBLE) >= CAST(r.wind_min_mph AS DOUBLE)) THEN 'within label'
+            ELSE 'outside label' END AS wind_status
+FROM products.label_rules r CROSS JOIN weather_views.forecast f
