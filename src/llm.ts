@@ -52,7 +52,7 @@ export const DEFAULT_MODELS = { fast: "nvidia/nemotron-3.5-lightning-30b-a3b", d
 
 export const modelFor = (lane: Lane) => (lane === "fast" ? env.METERLESS_FAST_MODE : env.METERLESS_DEEP_MODE) || DEFAULT_MODELS[lane];
 
-async function post(req: ChatRequest): Promise<ChatResponse> {
+async function post(req: ChatRequest, timeoutMs: number): Promise<ChatResponse> {
   const base = need("METERLESS_BASE_URL").replace(/\/+$/, "");
   const res = await fetch(`${base}/chat/completions`, {
     method: "POST",
@@ -63,7 +63,7 @@ async function post(req: ChatRequest): Promise<ChatResponse> {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(req),
-    signal: AbortSignal.timeout(Number(env.LLM_TIMEOUT_MS ?? 180_000)),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   return { status: res.status, body: await res.json().catch(() => ({})) };
 }
@@ -184,12 +184,17 @@ export async function chatJson<T>(o: ChatJsonOptions<T>): Promise<{ value: T; re
 
 async function callWithRetry(req: ChatRequest, o: ChatJsonOptions<unknown>): Promise<ChatResponse> {
   let res: ChatResponse | undefined;
+  // Ultra with reasoning on a long plan prompt routinely needs 2-3 minutes, so the deep lane
+  // gets a longer limit. A request that timed out is not retried unchanged: it would time out again.
+  const timeoutMs = Number((o.lane === "deep" ? env.LLM_TIMEOUT_MS_DEEP : env.LLM_TIMEOUT_MS_FAST) ?? env.LLM_TIMEOUT_MS ?? (o.lane === "deep" ? 480_000 : 180_000));
   for (let i = 0; i < 2; i++) {
     const started = Date.now();
+    let timedOut = false;
     try {
-      res = await post(req);
+      res = await post(req, timeoutMs);
     } catch (err) {
-      res = { status: 599, body: { error: { message: "Provider connection failed or timed out" } } };
+      timedOut = (err as Error).name === "TimeoutError";
+      res = { status: 599, body: { error: { message: timedOut ? `client timeout after ${timeoutMs / 1000}s waiting for Nightshift` : `connection to Nightshift failed: ${(err as Error).message}` } } };
     }
     if (o.runDir) record(o.runDir, "llm", req, res);
     const receipt = receiptOf(res.body, req.model, false);
@@ -197,6 +202,10 @@ async function callWithRetry(req: ChatRequest, o: ChatJsonOptions<unknown>): Pro
       lane: o.lane, purpose: o.purpose, reasoning: o.reasoning ?? true, retry: i, status: res.status, elapsedMs: Date.now() - started, requestKey: requestKey("llm", req), receipt,
     });
     if (res.status === 200 || (res.status < 500 && res.status !== 429)) return res;
+    if (timedOut) {
+      o.trace.emit("fallback", o.agent, `No reply from ${req.model} within ${timeoutMs / 1000}s (client timeout); not retrying the same request`, { status: res.status, timeoutMs });
+      return res;
+    }
     o.trace.emit("fallback", o.agent, `Nightshift returned ${res.status} on ${req.model}; retrying once`, { status: res.status });
     await new Promise(r => setTimeout(r, 2000));
   }

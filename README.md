@@ -15,9 +15,9 @@ npm run demo
 
 No `.env`, Docker, Zetaris or Nightshift account is needed. DuckDB reads the committed data files, the real agents execute, and model replies recorded live from Nightshift replay only when the entire request matches. The demo runs in about a second:
 
-1. **Session 1** plans the 48 hours: two irrigations, then five sprays. North 40 (B01) is sprayed at **07:15**.
+1. **Session 1** plans the 48 hours: two irrigations, then five sprays, approved by the Ultra critic after two rounds of objections.
 2. **A person records a correction:** "Never spray Block B01 before 08:00; the school bus passes at 07:30."
-3. **Session 2** plans again on the same forecast. B01 moves to **08:06**, and the plan cites memory `mem-1` and its trust-ledger entry.
+3. **Session 2** plans again on the same forecast. North 40's spray is reasoned against the correction ("memory mem-1 respected: spray starts after 08:00"), the critic confirms it, and the action carries the memory ID and its trust-ledger entry. Code then moves one spray by an hour to stay within the two ready sprayers.
 4. **Release** verifies every signed action contract and releases all seven actions.
 
 Each plan is a self-contained HTML page under `runs/`, with the block map, actions by day, rule checks, cited memories, the critic's notes, weather flags, model receipts and the full trace. Open it directly in a browser.
@@ -54,12 +54,12 @@ npm run spray -- plan
 ```sh
 npm run spray -- plan                                      # today's 48-hour plan
 npm run spray -- correct "Never before 08:00" --block B01  # record a correction
-npm run spray -- watch                                     # re-plan on the current forecast and memories
+npm run spray -- watch                                     # re-plan and show what changed since the last saved plan
 npm run spray -- release                                   # verify contracts, then release
 npm run record:cassettes                                   # record a live run for offline replay
 ```
 
-Prefix commands with `SAMPLE_MODE=true` for offline operation. `--today YYYY-MM-DD` (or `SPRAY_TODAY`) sets the planning date. Memory is stored durably in `.memory/`, or in `SPRAY_MEMORY_DIR`. `release` refuses the whole release if any action's contract is missing, was signed for a different version of the action, has an invalid signature, or has expired.
+Prefix commands with `SAMPLE_MODE=true` for offline operation. `--today YYYY-MM-DD` (or `SPRAY_TODAY`) sets the planning date. Memory is stored durably in `.memory/`, or in `SPRAY_MEMORY_DIR`. `release` refuses the whole release if the critic did not approve the plan, or if any action's contract is missing, was signed for a different version of the action, has an invalid signature, or has expired. `watch` compares the new plan with the last saved one and prints, per block, what moved and which forecast hours changed; the plan page shows the same under "What changed since the last plan".
 
 ## Architecture
 
@@ -89,8 +89,10 @@ flowchart TD
 | Weather analyst | Nemotron 3.5 Lightning | Flags gust spread, calm-wind inversion risk and rain probability as structured flags. |
 | Memory keeper | Meterless H-MEM | Retrieves each block's corrections, plus related memories, with provenance. |
 | Planner | Lightning, then Ultra for revisions | Proposes the plan inside the legal windows, crew shifts and equipment. |
-| Critic | Nemotron 3 Ultra + rule audits | Challenges the plan against rules, memories and buffers, and sends it back for up to three rounds. |
+| Critic | Nemotron 3 Ultra + code audits | Challenges the plan against rules, memories and buffers, and sends it back for up to three rounds. Code audits block illegal, off-shift, over-rate and overbooked actions even without the model. |
 | Reporter | Code only | Renders the plan page with every reason, check, memory and receipt. |
+
+After the model review, deterministic code audits hold every plan to the same bar, whether or not the Ultra critic is available. They block a spray outside a legal window computed by the rules checker (not one the model claims), any action outside a qualified crew member's shift, a rate above the label maximum or in the wrong unit, more simultaneous sprays than applicators or ready sprayers, and, when the Ultra critic is unavailable, any action on a block with a recorded correction, which a person must confirm. If the only blockers left after three rounds are scheduling clashes found by code in a plan the model critic did not block, code moves the clashing sprays (never one on a block with a correction) to the nearest legal, on-shift hour within capacity, re-signs them and re-runs every audit. Otherwise the plan is marked "requires attention" and cannot be released. Spray rates always come from the block's planned rate, never from the model. If the planner model is unavailable, a code planner books the earliest hour that is legal and has a certified crew member and a sprayer free.
 
 Where a label states no value, the rules checker applies a named farm-policy default (wind 2–10 mph, 4 rain-free hours) and every check says whether the label or farm policy set the limit. Rain is checked across the whole rain-free period after the application hour. Every action's contract is an HMAC-SHA256 over a hash of the action itself (kind, block, times, product and rate) and of its block, label, weather, memories and plan context. The signing key comes from `SPRAY_CONTRACT_SECRET`, or from a random key kept beside the local memory store.
 
@@ -124,9 +126,9 @@ npm run engine:conformance
 npm run demo
 ```
 
-- **Tests:** 19 offline tests cover legal windows, the pre-harvest deadline, rain inside the rain-free period, unstated label values, contract signing and release refusals (including an action edited after signing), the memory demo and re-plan staleness. All pass.
+- **Tests:** 36 offline tests cover legal windows, the pre-harvest deadline, rain inside the rain-free period, unstated label values, the code audits (legal window, crew shift, label rate, sprayer capacity, corrections without the model critic, wall-clock time formats), the scheduling repair, contract signing and release refusals (including an action edited after signing), the memory demo, re-plan staleness and plan diffs. All pass.
 - **H-MEM conformance:** 13/13 upstream checks pass (record validation, feedback deltas, ranking order, sleep guardrails, conflict gate, ledger audit, dream boundary).
-- **Live runs:** two runs against Zetaris and Nightshift are recorded in `data/cassettes/`. Each made 9 Nemotron calls, all HTTP 200 with receipts. In both, the critic objected in rounds 1 and 2 and approved in round 3. The second run was recorded after the B01 correction against the same forecast (`SPRAY_FORECAST_SOURCE=snapshot`) and moved B01's spray to 08:06. The offline demo replays both runs with no fallbacks.
+- **Live runs:** two sessions recorded on 27 October 2026 against Zetaris and Nightshift, in `data/cassettes/`: 8 and 10 Nemotron calls, all HTTP 200 with receipts. Session 1: the critic objected in rounds 1 and 2 (the code audit caught overbooked sprayers) and approved in round 3. Session 2, after the B01 correction and on the same forecast (`SPRAY_FORECAST_SOURCE=snapshot`): Ultra approved in round 3; the code audit still found one spray beyond sprayer capacity, and the scheduling repair moved it by an hour. Ultra plan revisions took up to 250 seconds and up to 16,000 output tokens, so the deep lane allows 8 minutes per call (`LLM_TIMEOUT_MS_DEEP`). The offline demo replays both sessions with no fallbacks. The demo video shows an earlier recording, in which session 1 placed B01 at 07:15 and the correction moved it to 08:06.
 
 ## Data, licences and pre-existing work
 
@@ -139,7 +141,7 @@ The Meterless H-MEM reference is the declared pre-existing component, retained u
 - **Advisory only.** Follow the pesticide label; the label is the law. A certified applicator must confirm weather, rates, buffers, re-entry and pre-harvest intervals, and local restrictions before any application.
 - The farm is fictional, and the label table covers six products for tree nuts. Labels change; check the current label.
 - The forecast is a model, not an on-site measurement. Wind direction is used for buffers, but drift also depends on droplet size and equipment.
-- `watch` re-plans the whole 48 hours on the current forecast and memories; it does not yet re-derive only the affected actions.
+- `watch` re-plans the whole 48 hours on the current forecast and memories, then reports what changed per block; it does not re-derive only the affected actions.
 - Models can disagree, time out or return invalid JSON. Revisions stop after three rounds; unresolved objections are left for a person. Fallbacks are labelled in the trace.
 - Per-agent SELECT grants are enforced by Zetaris, and by a shared allowlist in DuckDB. This is application access control, not isolation from a developer who can read `.env`.
 - Memory is single-user local storage. A shared deployment needs a shared store and access control.

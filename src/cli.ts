@@ -10,6 +10,7 @@ import { PolicyRefusal } from "./data/policy.ts";
 import { openBackend } from "./data/index.ts";
 import { runPlanPipeline, recordCorrection, type Correction } from "./orchestrator.ts";
 import { renderPlan } from "./agents/reporter.ts";
+import { diffPlans, diffLines } from "./plan-diff.ts";
 import { Trace } from "./trace.ts";
 import { writeFileSync, mkdirSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
@@ -27,6 +28,25 @@ const today = opt("today") ?? process.env.SPRAY_TODAY ?? new Date().toISOString(
 
 function isSampleMode(): boolean {
   return getSampleMode();
+}
+
+// Newest saved plan, excluding the run being written now.
+function latestSavedPlan(excludeRunId?: string): { dir: string; plan: Plan } | null {
+  const runsDir = path.join(ROOT, "runs");
+  if (!existsSync(runsDir)) return null;
+  const dirs = readdirSync(runsDir)
+    .filter(d => d !== excludeRunId && existsSync(path.join(runsDir, d, "plan.json")))
+    .sort()
+    .reverse();
+  for (const dir of dirs) {
+    try {
+      const plan = JSON.parse(readFileSync(path.join(runsDir, dir, "plan.json"), "utf8")) as Plan;
+      if (plan?.plan_id && Array.isArray(plan.actions)) return { dir, plan };
+    } catch {
+      // Skip a corrupt plan and keep looking.
+    }
+  }
+  return null;
 }
 
 async function main() {
@@ -98,7 +118,8 @@ async function main() {
 
       case "watch": {
         const work = async () => {
-          // Re-run plan pipeline - the orchestrator will pick up memories and changed forecast
+          // Compare with the newest saved plan before re-planning.
+          const previous = latestSavedPlan(runId);
           const { plan } = await runPlanPipeline({
             runId,
             runDir: trace.dir,
@@ -108,13 +129,25 @@ async function main() {
             maxCriticRounds: 3,
             trace,
           });
-          const html = renderPlan(plan, trace.events);
+          const diff = diffPlans(previous?.plan ?? null, plan);
+          const html = renderPlan(plan, trace.events, diff);
           const outDir = path.join(ROOT, "runs", runId);
           mkdirSync(outDir, { recursive: true });
           writeFileSync(path.join(outDir, `plan-${plan.plan_id}.html`), html);
           writeFileSync(path.join(outDir, "plan.json"), JSON.stringify(plan, null, 2) + "\n");
-          writeFileSync(path.join(outDir, "run.json"), JSON.stringify({ runId, cmd, today, backend: backend.name, sampleMode: isSampleMode(), plan_id: plan.plan_id, actions: plan.actions.length, re_plan: true }, null, 2) + "\n");
+          writeFileSync(path.join(outDir, "changes.json"), JSON.stringify(diff, null, 2) + "\n");
+          writeFileSync(path.join(outDir, "run.json"), JSON.stringify({ runId, cmd, today, backend: backend.name, sampleMode: isSampleMode(), plan_id: plan.plan_id, actions: plan.actions.length, previous_plan_id: diff.previous_plan_id, re_plan: true }, null, 2) + "\n");
           console.log(`\nRe-plan complete: ${path.join(outDir, `plan-${plan.plan_id}.html`)}`);
+          if (diff.previous_plan_id) {
+            console.log(`Changes since ${diff.previous_plan_id}:`);
+            for (const line of diffLines(diff)) console.log(`  ${line}`);
+            if (diff.weather_changes.length) {
+              console.log("Forecast hours changed:");
+              for (const w of diff.weather_changes) console.log(`  ${w.summary}`);
+            }
+          } else {
+            console.log("No previous saved plan; nothing to compare.");
+          }
           console.log(`Actions: ${plan.actions.length}`);
           for (const a of plan.actions) {
             console.log(`  ${a.action_id}: ${a.kind} on ${a.block_name} ${a.start ?? "—"}`);
@@ -134,6 +167,11 @@ async function main() {
             : undefined;
           if (!latest) throw new Error("No saved plan to release; run plan first");
           const plan = JSON.parse(readFileSync(path.join(runsDir, latest, "plan.json"), "utf8")) as Plan;
+          if (!plan.critic?.approved) {
+            console.log(`\nPlan ${plan.plan_id} was not approved by the critic; nothing released.`);
+            for (const f of (plan.critic?.findings ?? []).filter(f => f.severity === "block")) console.log(`  ${f.target}: ${f.message}`);
+            throw new Error("plan not approved by the critic");
+          }
           const secret = contractSecret();
           const results = plan.actions.map(a => ({ action: a, ...checkAction(a, secret) }));
           console.log(`\nPlan ${plan.plan_id} from ${latest}`);

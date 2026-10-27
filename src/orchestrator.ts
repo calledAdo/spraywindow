@@ -9,7 +9,7 @@ import type { WeatherFlag } from "./domain.ts";
 import { initHmem, recordCorrection, retrieveForPlan, detectConflicts, type Correction } from "./agents/memory_keeper.ts";
 import { createPlan, type PlannerInput, type PlannedAction } from "./agents/planner.ts";
 import { actionHash, contractSecret, signContract, verifyContract } from "./contracts.ts";
-import { critiquePlan, type CriticInput } from "./agents/critic.ts";
+import { critiquePlan, repairSchedule, type CriticInput, type CriticFinding, type Escalation } from "./agents/critic.ts";
 import { renderPlan } from "./agents/reporter.ts";
 import type { Block, ProductRule, WeatherHour, CrewMember, Equipment, ModelReceipt, MemoryRef, ContractInputs, Plan } from "./domain.ts";
 import type { Receipt } from "./llm.ts";
@@ -90,6 +90,7 @@ export async function runPlanPipeline(opts: OrchestratorOptions): Promise<{ plan
     let previousPlan: { plan_id: string; changes: string[] } | null = null;
     let planActions: PlannedAction[] = [];
     let criticReceipts: Receipt[] = [];
+    let finalCritic = { approved: false, summary: "", findings: [] as CriticFinding[], escalations: [] as Escalation[], rounds: 0, modelUsed: false };
     let plannerReceipt: Receipt | null = null;
 
     for (let round = 1; round <= (opts.maxCriticRounds ?? 3); round++) {
@@ -108,26 +109,7 @@ export async function runPlanPipeline(opts: OrchestratorOptions): Promise<{ plan
       planActions = actions;
       if (round === 1) plannerReceipt = plannerReceiptRound;
 
-      // Sign contracts for each action
-      for (const action of planActions) {
-        const inputs: ContractInputs = {
-          action_hash: actionHash(action),
-          block_hash: hashObj({ block_id: action.block_id, block_name: action.block_name }),
-          label_hash: hashObj({ product_id: action.product_id }),
-          weather_hash: hashObj({ forecast: action.weather }),
-          memory_hash: hashObj({ memories: action.memory_refs.map(m => m.memory_id) }),
-          plan_context_hash: hashObj({ round, actions: planActions.map(a => a.action_id) }),
-        };
-        action.contract = {
-          version: 1,
-          algorithm: "HMAC-SHA256",
-          action_id: action.action_id,
-          issued_at: new Date().toISOString(),
-          expires_at: new Date(Date.now() + 48 * 3600 * 1000).toISOString(),
-          inputs,
-          signature: signContract(inputs, CONTRACT_SECRET),
-        };
-      }
+      signContracts(planActions, round);
 
       // 6. Critic: challenge the plan
       trace.emit("agent-start", "critic", `Critique round ${round}`);
@@ -140,11 +122,13 @@ export async function runPlanPipeline(opts: OrchestratorOptions): Promise<{ plan
         crew,
         equipment,
         memoryRefs,
+        legalWindows,
         round,
         maxRounds: opts.maxCriticRounds ?? 3,
       };
       const { approved, summary, findings, escalations, receipt: criticReceipt } = await critiquePlan(trace, criticInput, "deep", opts.runDir);
       criticReceipts.push(criticReceipt);
+      finalCritic = { approved, summary, findings, escalations, rounds: round, modelUsed: criticReceipt.receiptId !== null };
 
       trace.emit("note", "critic", `Round ${round}: ${approved ? "approved" : "objections"}`, { findings: findings.length, escalations: escalations.length });
 
@@ -157,6 +141,22 @@ export async function runPlanPipeline(opts: OrchestratorOptions): Promise<{ plan
       // Objections: feed back to planner for revision
       previousPlan = { plan_id: planIdFor(planActions), changes: findings.map(f => f.message) };
       trace.emit("revision", "orchestrator", `Critic objections, revising plan`, { round, objections: findings.length });
+    }
+
+    // 6b. Code scheduling repair: only for clashes code found in a plan the model critic did not block.
+    if (!finalCritic.approved && finalCritic.modelUsed && !finalCritic.findings.some(f => f.severity === "block" && f.source === "model")) {
+      const repairInput: CriticInput = { plan: planActions, blocks, rules, forecast, weatherFlags, crew, equipment, memoryRefs, legalWindows, round: finalCritic.rounds, maxRounds: opts.maxCriticRounds ?? 3 };
+      const moves = repairSchedule(repairInput, finalCritic.findings);
+      if (moves) {
+        for (const m of moves) {
+          const action = planActions.find(a => a.action_id === m.action_id)!;
+          action.reasons = [...action.reasons, `Rescheduled by code from ${m.from} to ${m.to} to stay within sprayer and crew capacity`];
+          action.weather = forecast.find(h => h.valid_at.slice(0, 13) === (action.start ?? "").slice(0, 13)) ?? action.weather;
+          trace.emit("revision", "orchestrator", `Code rescheduled ${m.action_id}: ${m.from} -> ${m.to}`, m);
+        }
+        signContracts(planActions, finalCritic.rounds);
+        finalCritic = { ...finalCritic, approved: true, summary: `Approved after code rescheduled ${moves.length} action(s) for capacity`, findings: finalCritic.findings.filter(f => f.severity !== "block") };
+      }
     }
 
     // 7. Build final plan
@@ -174,13 +174,14 @@ export async function runPlanPipeline(opts: OrchestratorOptions): Promise<{ plan
       horizon_start: forecast[0]?.valid_at ?? new Date().toISOString(),
       horizon_end: forecast[Math.min(47, forecast.length - 1)]?.valid_at ?? new Date(Date.now() + 48 * 3600 * 1000).toISOString(),
       actions: planActions,
+      // The last critic round's real verdict; release refuses a plan the critic did not approve.
       critic: {
-        rounds: opts.maxCriticRounds ?? 3,
-        approved: planActions.every(a => a.status !== "escalated"),
-        summary: `Plan completed with ${planActions.length} actions`,
-        findings: [],
-        escalations: [],
-        model_used: true,
+        rounds: finalCritic.rounds,
+        approved: finalCritic.approved,
+        summary: finalCritic.approved ? `Approved with ${planActions.length} actions` : `Not approved after ${finalCritic.rounds} round(s): ${finalCritic.summary}`,
+        findings: finalCritic.findings,
+        escalations: finalCritic.escalations,
+        model_used: finalCritic.modelUsed,
       },
       weather_flags: weatherFlags,
       receipts: [
@@ -226,6 +227,29 @@ async function loadBlocks(ctx: RunContext): Promise<Block[]> {
     irrigation_deficit_mm: Number(r.irrigation_deficit_mm ?? 0),
     irrigation_trigger_mm: Number(r.irrigation_trigger_mm ?? 0),
   }));
+}
+
+// Sign (or re-sign) every action's contract over the action itself and its inputs.
+function signContracts(planActions: PlannedAction[], round: number): void {
+  for (const action of planActions) {
+    const inputs: ContractInputs = {
+      action_hash: actionHash(action),
+      block_hash: hashObj({ block_id: action.block_id, block_name: action.block_name }),
+      label_hash: hashObj({ product_id: action.product_id }),
+      weather_hash: hashObj({ forecast: action.weather }),
+      memory_hash: hashObj({ memories: action.memory_refs.map(m => m.memory_id) }),
+      plan_context_hash: hashObj({ round, actions: planActions.map(a => a.action_id) }),
+    };
+    action.contract = {
+      version: 1,
+      algorithm: "HMAC-SHA256",
+      action_id: action.action_id,
+      issued_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 48 * 3600 * 1000).toISOString(),
+      inputs,
+      signature: signContract(inputs, CONTRACT_SECRET),
+    };
+  }
 }
 
 // Content-derived plan id: the same actions give the same id, so recorded runs replay.

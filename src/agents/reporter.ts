@@ -2,6 +2,7 @@
 // reasons, rule checks, cited memories, critic notes, and model receipt table.
 import type { Plan, ModelReceipt, CriticFinding, Escalation, WeatherFlag, PlannedAction, RuleCheck, MemoryRef } from "../domain.ts";
 import type { TraceEvent } from "../trace.ts";
+import type { PlanDiff } from "../plan-diff.ts";
 
 const CSS = `
 :root { color-scheme: light dark; --bg:#f4f7f9; --surface:#fff; --text:#172b38; --muted:#4d626f; --line:#c9d5dd; --accent:#125b83; --tint:#eaf2f7; --warning:#805000; --warning-bg:#fff2d7; --danger:#a32b32; --danger-bg:#ffe9e9; --success:#1a6b2e; --success-bg:#e8f5e9; }
@@ -41,7 +42,7 @@ function table(headers: string[], rows: string[][], caption: string): string {
   return `<div class="table-wrap" tabindex="0" role="region" aria-label="${esc(caption)}"><table><caption>${esc(caption)}</caption><thead><tr>${headers.map(h => `<th scope="col">${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows.map(row => `<tr>${row.map((cell, i) => `<td data-label="${esc(headers[i])}"><div class="cell">${cell}</div></td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
 }
 
-export function renderPlan(plan: Plan, events: TraceEvent[]): string {
+export function renderPlan(plan: Plan, events: TraceEvent[], diff?: PlanDiff | null): string {
   const actionsByDay: Record<string, Plan["actions"]> = {};
   for (const a of plan.actions) {
     if (!a.start) continue;
@@ -86,6 +87,28 @@ export function renderPlan(plan: Plan, events: TraceEvent[]): string {
     esc(w.note),
   ]);
 
+  const hasDiff = !!diff?.previous_plan_id;
+  const changedRows = hasDiff
+    ? diff!.changes.filter(c => c.status !== "unchanged").map(c => [
+        esc(`${c.block_id} ${c.block_name}`),
+        badge(c.kind, c.kind === "spray" ? "danger" : c.kind === "irrigate" ? "default" : "warning"),
+        esc(c.summary.replace(`${c.block_id} ${c.block_name}: `, "")),
+      ])
+    : [];
+  const unchangedCount = hasDiff ? diff!.changes.filter(c => c.status === "unchanged").length : 0;
+  const weatherChangeRows = hasDiff
+    ? diff!.weather_changes.map(w => [esc(`${w.block_id} ${w.block_name}`), badge(w.kind), esc(w.summary.replace(`${w.block_id} ${w.block_name} ${w.kind} `, ""))])
+    : [];
+  const changeSection = hasDiff ? `
+    <section id="changes" class="panel">
+      <h2>What changed since the last plan</h2>
+      <p><strong>Previous plan:</strong> ${esc(diff!.previous_plan_id)}</p>
+      ${changedRows.length ? table(["Block", "Kind", "Change"], changedRows, "Action changes") : `<p class="muted success">No action changes.</p>`}
+      ${unchangedCount ? `<p class="muted">${unchangedCount} action(s) unchanged.</p>` : ""}
+      ${weatherChangeRows.length ? table(["Block", "Kind", "Forecast hour"], weatherChangeRows, "Forecast changes for affected actions") : ""}
+    </section>
+  ` : "";
+
   const previousPlan = plan.previous_plan ? `
     <section class="panel">
       <h2>Previous Plan</h2>
@@ -117,8 +140,11 @@ export function renderPlan(plan: Plan, events: TraceEvent[]): string {
         <a href="#weather">Weather Flags</a>
         <a href="#receipts">Model Receipts</a>
         <a href="#trace">Trace</a>
+        ${hasDiff ? `<a href="#changes">What Changed</a>` : ""}
       </nav>
     </header>
+
+    ${changeSection}
 
     ${previousPlan}
 

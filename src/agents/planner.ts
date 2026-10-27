@@ -79,6 +79,12 @@ ${input.forecast.slice(0, 48).map(h => `${h.valid_at}: wind ${h.wind_speed_mph}m
 Memories:
 ${memorySummary || "none"}
 
+Hard limits (code audits block any plan that breaks them):
+- At most ${input.equipment.filter(e => e.type === "sprayer" && e.status === "ready").length} sprays at the same time (ready sprayers), and no crew member on two actions at once.
+- Every spray lies inside one legal window above, and a pesticide_applicator is on shift for its whole duration.
+- Every irrigation has an irrigation_specialist on shift for its whole duration.
+- Write times as farm-local wall clock, YYYY-MM-DDTHH:MM, with no offset or Z.
+
 Previous plan: ${input.previousPlan ? input.previousPlan.plan_id + " (" + input.previousPlan.changes.join(", ") + ")" : "none"}
 
 Propose a 48-hour plan.`;
@@ -100,10 +106,17 @@ Propose a 48-hour plan.`;
         return v;
       },
       reasoning: lane === "deep",
-      maxTokens: lane === "deep" ? 8000 : 4000,
+      maxTokens: lane === "deep" ? 16000 : 4000, // Ultra reasons inline before the JSON; 8000 truncated long revisions
       trace,
       runDir,
     });
+    // The rate is the block's planned rate, never a model's guess; label limits are audited later.
+    for (const action of value) {
+      const block = input.blocks.find(b => b.block_id === action.block_id);
+      if (action.kind === "spray" && block) { action.rate = block.planned_rate; action.rate_unit = block.rate_unit; action.product_id = block.product_id; }
+      // Memory links come from the memory keeper, not from the model's text.
+      action.memory_refs = input.memoryRefs.get(action.block_id) ?? [];
+    }
     return { actions: value, receipt };
   } catch (e) {
     trace.emit("fallback", "planner", `model unavailable, using deterministic fallback: ${(e as Error).message}`, { lane });
@@ -111,67 +124,76 @@ Propose a 48-hour plan.`;
   }
 }
 
-function deterministicFallback(input: PlannerInput): PlannedAction[] {
-  const actions: PlannedAction[] = [];
-  let actionCounter = 0;
+// Farm-local timestamps ("2026-10-25T08:00") handled in one frame and written back the same way.
+const toMs = (v: string) => Date.parse(/[zZ]|[+-]\d\d:\d\d$/.test(v) ? v : `${v}Z`);
+const toLocal = (ms: number) => new Date(ms).toISOString().slice(0, 16);
+const shiftMinutes = (t: string) => { const [h, m] = t.split(":").map(Number); return h * 60 + (m || 0); };
 
-  for (const [blockId, windows] of input.legalWindows) {
-    const block = input.blocks.find(b => b.block_id === blockId);
-    if (!block) continue;
-    const rule = input.productRules.get(block.product_id!);
-    // One application per block: the earliest legal window.
-    const earliest = [...windows].sort((a, b) => a.start.localeCompare(b.start)).slice(0, 1);
-    for (const window of earliest) {
-      const start = new Date(window.start);
-      const end = new Date(window.end);
-      const actionEnd = new Date(Math.min(end.getTime(), start.getTime() + 2 * 3600 * 1000));
-      actions.push({
-        action_id: `act_${++actionCounter}`,
-        block_id: blockId,
-        block_name: block.name,
-        kind: "spray",
-        start: window.start,
-        end: actionEnd.toISOString(),
-        product_id: block.product_id,
-        product_name: rule?.name ?? null,
-        rate: block.planned_rate,
-        rate_unit: block.rate_unit,
-        status: "proposed",
-        reasons: [`Legal window ${window.start} to ${window.end}`],
-        rule_checks: window.rule_checks,
-        memory_refs: input.memoryRefs.get(blockId) ?? [],
-        weather: input.forecast.find(h => h.valid_at === window.start) ?? null,
-        contract: null,
-      });
-    }
-  }
-
-  for (const block of input.blocks) {
-    if (block.irrigation_deficit_mm >= block.irrigation_trigger_mm) {
-      for (const hour of input.forecast.slice(0, 48)) {
-        if (hour.precipitation_mm === 0 && hour.precipitation_probability_pct < 30) {
-          actions.push({
-            action_id: `act_${++actionCounter}`,
-            block_id: block.block_id,
-            block_name: block.name,
-            kind: "irrigate",
-            start: hour.valid_at,
-            end: new Date(new Date(hour.valid_at).getTime() + 4 * 3600 * 1000).toISOString(),
-            product_id: null,
-            product_name: null,
-            rate: null,
-            rate_unit: null,
-            status: "proposed",
-            reasons: [`Irrigation deficit ${block.irrigation_deficit_mm}mm >= trigger ${block.irrigation_trigger_mm}mm`],
-            rule_checks: [],
-            memory_refs: input.memoryRefs.get(block.block_id) ?? [],
-            weather: hour,
-            contract: null,
-          });
+/** First one-hour slot inside one of the windows and inside a shift of crew holding the certification. */
+function firstSlot(windows: { start: string; end: string }[], crew: PlannerInput["crew"], certification: string, busy: Map<string, [number, number][]>, limit = Infinity): { start: string; end: string; crew_id: string } | null {
+  const qualified = crew.filter(c => c.certifications.includes(certification));
+  const slots: { start: number; end: number; crew_id: string }[] = [];
+  for (const w of windows) {
+    const ws = toMs(w.start), we = toMs(w.end);
+    for (let day = Math.floor(ws / 86_400_000) * 86_400_000; day < we; day += 86_400_000) {
+      for (const c of qualified) {
+        const shiftEnd = Math.min(we, day + shiftMinutes(c.available_end) * 60_000);
+        // Earliest hour in this window and shift that the crew member is not already booked for.
+        for (let start = Math.max(ws, day + shiftMinutes(c.available_start) * 60_000); start + 3_600_000 <= shiftEnd; start += 3_600_000) {
+          const end = start + 3_600_000;
+          if ((busy.get(c.crew_id) ?? []).some(([s, e]) => start < e && s < end)) continue;
+          // Equipment limit: no more overlapping actions of this kind than units available.
+          if ([...busy.entries()].filter(([id]) => qualified.some(q => q.crew_id === id)).flatMap(([, v]) => v).filter(([s, e]) => start < e && s < end).length >= limit) continue;
+          slots.push({ start, end, crew_id: c.crew_id });
           break;
         }
       }
     }
+  }
+  slots.sort((x, y) => x.start - y.start);
+  const best = slots[0];
+  if (!best) return null;
+  busy.set(best.crew_id, [...(busy.get(best.crew_id) ?? []), [best.start, best.end]]);
+  return { start: toLocal(best.start), end: toLocal(best.end), crew_id: best.crew_id };
+}
+
+function deterministicFallback(input: PlannerInput): PlannedAction[] {
+  const actions: PlannedAction[] = [];
+  let actionCounter = 0;
+  const busy = new Map<string, [number, number][]>();
+  const base = (block: PlannerInput["blocks"][number]) => ({ block_id: block.block_id, block_name: block.name, status: "proposed" as const, memory_refs: input.memoryRefs.get(block.block_id) ?? [], contract: null });
+
+  // One application per block: the earliest hour that is legal and has a certified applicator on shift.
+  for (const [blockId, windows] of input.legalWindows) {
+    const block = input.blocks.find(b => b.block_id === blockId);
+    if (!block) continue;
+    const rule = input.productRules.get(block.product_id!);
+    const slot = firstSlot(windows, input.crew, "pesticide_applicator", busy, input.equipment.filter(e => e.type === "sprayer" && e.status === "ready").length);
+    const window = slot && windows.find(w => toMs(w.start) <= toMs(slot.start) && toMs(slot.end) <= toMs(w.end));
+    actions.push({
+      ...base(block), action_id: `act_${++actionCounter}`, kind: slot ? "spray" : "hold",
+      start: slot?.start ?? null, end: slot?.end ?? null,
+      product_id: block.product_id, product_name: rule?.name ?? null,
+      rate: slot ? block.planned_rate : null, rate_unit: slot ? block.rate_unit : null,
+      reasons: slot ? [`Legal window ${window!.start} to ${window!.end}`, `Applicator ${slot.crew_id} on shift`] : ["No legal hour with a certified applicator on shift in the next 48 hours"],
+      rule_checks: window?.rule_checks ?? [],
+      weather: slot ? input.forecast.find(h => toMs(h.valid_at) === toMs(slot.start)) ?? null : null,
+    });
+  }
+
+  // Irrigation in the first dry stretch with an irrigation crew member on shift.
+  for (const block of input.blocks) {
+    if (block.irrigation_deficit_mm < block.irrigation_trigger_mm) continue;
+    const dry = input.forecast.slice(0, 48).filter(h => h.precipitation_mm === 0 && h.precipitation_probability_pct < 30)
+      .map(h => ({ start: h.valid_at, end: toLocal(toMs(h.valid_at) + 3_600_000) }));
+    const slot = firstSlot(dry, input.crew, "irrigation", busy);
+    if (!slot) continue;
+    actions.push({
+      ...base(block), action_id: `act_${++actionCounter}`, kind: "irrigate", start: slot.start, end: slot.end,
+      product_id: null, product_name: null, rate: null, rate_unit: null,
+      reasons: [`Irrigation deficit ${block.irrigation_deficit_mm}mm >= trigger ${block.irrigation_trigger_mm}mm`, `Irrigation tech ${slot.crew_id} on shift`],
+      rule_checks: [], weather: input.forecast.find(h => toMs(h.valid_at) === toMs(slot.start)) ?? null,
+    });
   }
 
   return actions;
